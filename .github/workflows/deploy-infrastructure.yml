@@ -1,0 +1,70 @@
+name: deploy-infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Infrastructure action'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+        - deploy
+        - destroy
+        - setup
+  push:
+    branches: [ main ]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/infrastructure.yml'
+
+env:
+  TERRAFORM_VERSION: 1.12.2
+
+jobs:
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    # environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: google auth setup
+      id: auth
+      uses: google-github-actions/auth@v1
+      with:
+        workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+    - uses: google-github-actions/setup-gcloud@v1
+
+    - run: terraform init
+      working-directory: terraform      
+
+    - run: terraform plan -out=tfplan
+      id: plan
+      working-directory: terraform
+      if: github.event.inputs.action != 'destroy'
+
+    - run: terraform apply -auto-approve tfplan
+      working-directory: terraform
+      if: github.event.inputs.action != 'destroy'
+
+    - run: terraform destroy -auto-approve
+      working-directory: terraform
+      if: github.event.inputs.action == 'destroy'
+
+    - name: get instance ip
+      id: instance_ip
+      working-directory: terraform
+      run: |
+        if [ "${{ github.event.inputs.action }}" != "destroy" ]; then
+          IP=$(terraform output -raw instance_ip)
+          echo "instance_ip=$IP" >> $GITHUB_OUTPUT
+          echo "Instance IP: $IP"
+        fi

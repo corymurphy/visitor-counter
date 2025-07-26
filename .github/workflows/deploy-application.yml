@@ -1,0 +1,218 @@
+name: deploy-application
+
+on:
+  pull_request:
+    types: [labeled, unlabeled]
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  GO_VERSION: 1.24
+  APP_NAME: visitor-counter
+  PROD_DOMAIN: visitor-counter.corymurphy.net
+  DEV_DOMAIN: visitor-counter-development.corymurphy.net
+
+jobs:
+  development:
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'deploy development')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: build
+        run: |
+          echo "Building ${{ env.APP_NAME }} for development..."
+          go build -o ${{ env.APP_NAME }} main.go
+          echo "Build completed successfully"
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: get instance ip
+        id: instance_ip
+        working-directory: terraform
+        run: |
+          IP=$(terraform output -raw instance_ip)
+          echo "instance_ip=$IP" >> $GITHUB_OUTPUT
+          echo "Instance IP: $IP"
+
+      - name: create deploy script
+        run: |
+          echo "Creating deployment script on server..."
+          
+          INSTANCE_NAME=`gcloud compute instances list --filter="tags.items=visitor-counter" --format="value(name)"`
+          
+          # Copy the deploy script and config to the server
+          gcloud compute scp scripts/deploy.sh scripts/environments.conf $INSTANCE_NAME:/tmp/ \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }}
+          
+          # Move the files to the correct location and make script executable
+          gcloud compute ssh $INSTANCE_NAME \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command="sudo mkdir -p /opt/${{ env.APP_NAME }}/shared && sudo mv /tmp/deploy.sh /opt/${{ env.APP_NAME }}/shared/deploy.sh && sudo mv /tmp/environments.conf /opt/${{ env.APP_NAME }}/shared/environments.conf && sudo chmod +x /opt/${{ env.APP_NAME }}/shared/deploy.sh"
+          
+          echo "Deployment script and configuration created successfully!"
+
+      - name: deploy
+        run: |
+          echo "Deploying to development environment..."
+          
+          VERSION="dev-${GITHUB_PR_NUMBER}-$(date +%Y%m%d-%H%M%S)"
+          echo "Version: $VERSION"
+
+          INSTANCE_NAME=`gcloud compute instances list --filter="tags.items=visitor-counter" --format="value(name)"`
+          
+          echo "Copying binary to server..."
+          gcloud compute scp ${{ env.APP_NAME }} $INSTANCE_NAME:/tmp/${{ env.APP_NAME }}-${VERSION} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }}
+          
+          echo "Running deployment script..."
+          gcloud compute ssh $INSTANCE_NAME \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command="sudo /opt/${{ env.APP_NAME }}/shared/deploy.sh development ${VERSION} /tmp/${{ env.APP_NAME }}-${VERSION}"
+          
+          gcloud compute ssh $INSTANCE_NAME \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command="rm -f /tmp/${{ env.APP_NAME }}-${VERSION}"
+          
+          echo "Development deployment completed successfully!"
+          echo "Preview URL: https://${{ env.DEV_DOMAIN }}"
+
+      - name: verify
+        run: |
+          echo "Verifying development deployment..."
+          sleep 10
+          
+          # Test health endpoint
+          if curl -f -s "https://${{ env.DEV_DOMAIN }}/health" > /dev/null; then
+            echo "✅ Development deployment verified successfully!"
+          else
+            echo "❌ Development deployment verification failed"
+            exit 1
+          fi
+
+  production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: build
+        run: |
+          echo "Building ${{ env.APP_NAME }} for production..."
+          go build -o ${{ env.APP_NAME }} main.go
+          echo "Build completed successfully"
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: create deploy script
+        run: |
+          echo "Creating deployment script on server..."
+          
+          # Copy the deploy script and config to the server
+          gcloud compute scp scripts/deploy.sh scripts/environments.conf ${{ secrets.GCP_INSTANCE_NAME }}:/tmp/ \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }}
+          
+          # Move the files to the correct location and make script executable
+          gcloud compute ssh ${{ secrets.GCP_INSTANCE_NAME }} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command="sudo mkdir -p /opt/${{ env.APP_NAME }}/shared && sudo mv /tmp/deploy.sh /opt/${{ env.APP_NAME }}/shared/deploy.sh && sudo mv /tmp/environments.conf /opt/${{ env.APP_NAME }}/shared/environments.conf && sudo chmod +x /opt/${{ env.APP_NAME }}/shared/deploy.sh"
+          
+          echo "Deployment script and configuration created successfully!"
+
+      - name: create release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.run_number }}
+          release_name: Release v${{ github.run_number }}
+          body: |
+            Production deployment for commit ${{ github.sha }}
+            
+            Changes:
+            ${{ github.event.head_commit.message }}
+          draft: false
+          prerelease: false
+
+      - name: deploy
+        run: |
+          echo "Deploying to production environment..."
+          
+          # Generate version from run number
+          VERSION="v${{ github.run_number }}"
+          echo "Version: $VERSION"
+          
+          # Copy binary to server
+          echo "Copying binary to server..."
+          gcloud compute scp ${{ env.APP_NAME }} ${{ secrets.GCP_INSTANCE_NAME }}:/tmp/${{ env.APP_NAME }}-${VERSION} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }}
+          
+          # Deploy using the deployment script
+          echo "Running deployment script..."
+          gcloud compute ssh ${{ secrets.GCP_INSTANCE_NAME }} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command="sudo /opt/${{ env.APP_NAME }}/shared/deploy.sh production ${VERSION} /tmp/${{ env.APP_NAME }}-${VERSION}"
+          
+          # Clean up temporary file
+          gcloud compute ssh ${{ secrets.GCP_INSTANCE_NAME }} \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command="rm -f /tmp/${{ env.APP_NAME }}-${VERSION}"
+          
+          echo "Production deployment completed successfully!"
+          echo "Production URL: https://${{ env.PROD_DOMAIN }}"
+
+      - name: verify
+        run: |
+          echo "Verifying production deployment..."
+          sleep 10
+          
+          # Test health endpoint
+          if curl -f -s "https://${{ env.PROD_DOMAIN }}/health" > /dev/null; then
+            echo "✅ Production deployment verified successfully!"
+          else
+            echo "❌ Production deployment verification failed"
+            exit 1
+          fi
+
+      - name: notify
+        run: |
+          echo "🚀 Production deployment completed!"
+          echo "📊 Version: v${{ github.run_number }}"
+          echo "🌐 URL: https://${{ env.PROD_DOMAIN }}"
+          echo "🔗 Release: ${{ steps.create_release.outputs.upload_url }}" 
