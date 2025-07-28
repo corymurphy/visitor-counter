@@ -129,7 +129,10 @@ func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
 </html>`, count.Count, count.LastVisit.Format("Jan 2, 2006 at 3:04 PM"))
 
 	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(html))
+	_, err := w.Write([]byte(html))
+	if err != nil {
+		log.Printf("Error writing response: %v", err)
+	}
 }
 
 func (app *App) handleVisit(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +149,10 @@ func (app *App) handleVisit(w http.ResponseWriter, r *http.Request) {
 	count := app.incrementVisitorCount(ip)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(count)
+	err := json.NewEncoder(w).Encode(count)
+	if err != nil {
+		log.Printf("Error writing response: %v", err)
+	}
 }
 
 func (app *App) handleGetCount(w http.ResponseWriter, r *http.Request) {
@@ -155,15 +161,21 @@ func (app *App) handleGetCount(w http.ResponseWriter, r *http.Request) {
 	app.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(count)
+	err := json.NewEncoder(w).Encode(count)
+	if err != nil {
+		log.Printf("Error writing response: %v", err)
+	}
 }
 
 func (app *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	err := json.NewEncoder(w).Encode(map[string]string{
 		"status": "healthy",
 		"time":   time.Now().Format(time.RFC3339),
 	})
+	if err != nil {
+		log.Printf("Error writing response: %v", err)
+	}
 }
 
 func (app *App) incrementVisitorCount(ip string) *VisitorCount {
