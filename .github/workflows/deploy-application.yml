@@ -127,20 +127,16 @@ jobs:
 
       - name: create release
         if: matrix.environment == 'production'
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.env_vars.outputs.version }}
-          release_name: Release ${{ steps.env_vars.outputs.version }}
-          body: |
-            Production deployment for commit ${{ github.sha }}
+        run: |
+          gh release create ${{ steps.env_vars.outputs.version }} \
+            --title "Release ${{ steps.env_vars.outputs.version }}" \
+            --notes "Production deployment for commit ${{ github.sha }}
             
-            Changes:
-            ${{ github.event.head_commit.message }}
-          draft: false
-          prerelease: false
+          Changes:
+          ${{ github.event.head_commit.message }}" \
+            --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: run deploy.sh
         run: |
@@ -202,32 +198,7 @@ jobs:
               body: comment
             });
 
-      # - name: update github environment
-      #   if: matrix.environment == 'development' && github.event_name == 'pull_request'
-      #   uses: actions/github-script@v7
-      #   with:
-      #     script: |
-      #       const deployment = await github.rest.repos.createDeployment({
-      #         owner: context.repo.owner,
-      #         repo: context.repo.repo,
-      #         ref: context.sha,
-      #         environment: 'development',
-      #         description: 'Development deployment',
-      #         auto_merge: false,
-      #         required_contexts: []
-      #       });
-
-      #       await github.rest.repos.createDeploymentStatus({
-      #         owner: context.repo.owner,
-      #         repo: context.repo.repo,
-      #         deployment_id: deployment.data.id,
-      #         state: 'success',
-      #         environment_url: 'https://${{ steps.env_vars.outputs.domain }}',
-      #         description: 'Development deployment successful'
-      #       });
-
       - name: update environment
-        # if: matrix.environment == 'production'
         uses: actions/github-script@v7
         with:
           script: |
