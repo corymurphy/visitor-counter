@@ -117,3 +117,10 @@ systemctl status visitor-counter-development
 tail -f /var/log/visitor-counter/production/app.log
 tail -f /var/log/visitor-counter/development/app.log
 ```
+
+## Future Enhancements
+
+- Cloudflare Mutual TLS
+- GCP Load Blanancer and Autoscaling
+- Automated Credential Rotation
+
