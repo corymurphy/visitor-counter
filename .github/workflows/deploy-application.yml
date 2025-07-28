@@ -57,7 +57,7 @@ jobs:
       matrix:
         environment: ${{ fromJson(needs.gate.outputs.environments) }}
     permissions:
-      contents: read
+      contents: write
       id-token: write
       deployments: write
       pull-requests: write
