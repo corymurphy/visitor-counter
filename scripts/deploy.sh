@@ -24,11 +24,11 @@ load_environment_config() {
         case "$env" in
             "production")
                 PORT="8080"
-                DOMAIN="visitor-counter.corymurphy.net"
+                DOMAIN="visitor-counter-corymurphy.net"
                 ;;
             "development")
                 PORT="8081"
-                DOMAIN="visitor-counter.development.corymurphy.net"
+                DOMAIN="visitor-counter-development.corymurphy.net"
                 ;;
             *)
                 echo "Error: Unknown environment '$env'"
@@ -125,8 +125,12 @@ configure_nginx() {
     # Create nginx site configuration
     cat > "/etc/nginx/sites-available/${APP_NAME}-${ENVIRONMENT}" << EOF
 server {
-    listen 80;
-    server_name ${DOMAIN};
+    listen              443 ssl;
+    server_name         ${DOMAIN};
+    ssl_certificate     /etc/ssl/private/cloudflare.crt;
+    ssl_certificate_key /etc/ssl/private/cloudflare.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
 
     # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;

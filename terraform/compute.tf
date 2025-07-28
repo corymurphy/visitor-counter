@@ -13,8 +13,6 @@ resource "google_compute_instance" "app" {
     }
   }
 
-
-
   network_interface {
     subnetwork = google_compute_subnetwork.subnet.id
     access_config {

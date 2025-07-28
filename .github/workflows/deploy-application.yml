@@ -1,8 +1,8 @@
-name: deploy-application
+name: cd
 
 on:
   pull_request:
-    types: [labeled, unlabeled]
+    types: [labeled, unlabeled, opened, reopened, synchronize]
     branches: [main]
   push:
     branches: [main]
@@ -10,16 +10,57 @@ on:
 env:
   GO_VERSION: 1.24
   APP_NAME: visitor-counter
-  PROD_DOMAIN: visitor-counter.corymurphy.net
-  DEV_DOMAIN: visitor-counter-development.corymurphy.net
 
 jobs:
-  development:
-    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'deploy development')
+  gate:
     runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.determine_environments.outputs.environments }}
+    steps:
+      - name: determine environments to deploy to
+        id: determine_environments
+        run: |
+          environments=""
+          
+          # Check if development should deploy
+          if [[ "${{ github.event_name }}" == "pull_request" && 
+                $(echo '${{ toJSON(github.event.pull_request.labels) }}' | jq -r '.[] | select(.name == "deploy development") | .name') == "deploy development" ]]; then
+            environments="development"
+          fi
+          
+          # Check if production should deploy
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            if [[ -n "$environments" ]]; then
+              environments="$environments,production"
+            else
+              environments="production"
+            fi
+          fi
+          
+          # If no environments to deploy, set to empty array
+          if [[ -z "$environments" ]]; then
+            environments="[]"
+          else
+            # Convert comma-separated to JSON array
+            environments=$(echo "$environments" | jq -R 'split(",")' | jq -c '.')
+          fi
+          
+          echo "environments=$environments" >> $GITHUB_OUTPUT
+          echo "Will deploy to: $environments"
+
+  deploy:
+    name: ${{ matrix.environment }}
+    needs: gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJson(needs.gate.outputs.environments) }}
     permissions:
-      contents: 'read'
-      id-token: 'write'
+      contents: read
+      id-token: write
+      deployments: write
+      pull-requests: write
     
     steps:
       - uses: actions/checkout@v4
@@ -27,124 +68,57 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: build
-        run: |
-          echo "Building ${{ env.APP_NAME }} for development..."
-          go build -o ${{ env.APP_NAME }} main.go
-          echo "Build completed successfully"
-
       - uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+           credentials_json: '${{ secrets.GOOGLE_CREDENTIALS }}'
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: get instance ip
-        id: instance_ip
-        working-directory: terraform
+      - name: set environment variables
+        id: env_vars
         run: |
-          IP=$(terraform output -raw instance_ip)
-          echo "instance_ip=$IP" >> $GITHUB_OUTPUT
-          echo "Instance IP: $IP"
+            domain=$(grep -A 3 "\[${{ matrix.environment }}\]" scripts/environments.conf | grep "domain=" | cut -d'=' -f2)
+            echo "domain=$domain" >> $GITHUB_OUTPUT
+            echo "version=dev-${{ github.event.pull_request.number }}-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: build
+        run: |
+          echo "Building ${{ env.APP_NAME }} for ${{ matrix.environment }}..."
+          go build -o ${{ env.APP_NAME }} main.go
+          echo "Build completed successfully"
+
+      - name: configure tls
+        run: |
+          INSTANCE_NAME=`gcloud compute instances list --filter="tags.items=visitor-counter" --format="value(name)"`
+
+          gcloud compute ssh $INSTANCE_NAME \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command='sudo tee /etc/ssl/private/cloudflare.key > /dev/null << EOF
+          ${{ secrets.CLOUDFLARE_PRIVATEKEY }}
+          EOF'
+
+          gcloud compute ssh $INSTANCE_NAME \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command='sudo tee /etc/ssl/private/cloudflare.crt > /dev/null << EOF
+          ${{ secrets.CLOUDFLARE_PUBLICKEY }}
+          EOF'
+
+          gcloud compute ssh $INSTANCE_NAME \
+            --zone=${{ secrets.GCP_ZONE }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --command='sudo chmod 600 /etc/ssl/private/cloudflare.key /etc/ssl/private/cloudflare.crt'
 
       - name: create deploy script
         run: |
-          echo "Creating deployment script on server..."
-          
           INSTANCE_NAME=`gcloud compute instances list --filter="tags.items=visitor-counter" --format="value(name)"`
-          
-          # Copy the deploy script and config to the server
+
           gcloud compute scp scripts/deploy.sh scripts/environments.conf $INSTANCE_NAME:/tmp/ \
             --zone=${{ secrets.GCP_ZONE }} \
             --project=${{ secrets.GCP_PROJECT_ID }}
           
-          # Move the files to the correct location and make script executable
           gcloud compute ssh $INSTANCE_NAME \
-            --zone=${{ secrets.GCP_ZONE }} \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
-            --command="sudo mkdir -p /opt/${{ env.APP_NAME }}/shared && sudo mv /tmp/deploy.sh /opt/${{ env.APP_NAME }}/shared/deploy.sh && sudo mv /tmp/environments.conf /opt/${{ env.APP_NAME }}/shared/environments.conf && sudo chmod +x /opt/${{ env.APP_NAME }}/shared/deploy.sh"
-          
-          echo "Deployment script and configuration created successfully!"
-
-      - name: deploy
-        run: |
-          echo "Deploying to development environment..."
-          
-          VERSION="dev-${GITHUB_PR_NUMBER}-$(date +%Y%m%d-%H%M%S)"
-          echo "Version: $VERSION"
-
-          INSTANCE_NAME=`gcloud compute instances list --filter="tags.items=visitor-counter" --format="value(name)"`
-          
-          echo "Copying binary to server..."
-          gcloud compute scp ${{ env.APP_NAME }} $INSTANCE_NAME:/tmp/${{ env.APP_NAME }}-${VERSION} \
-            --zone=${{ secrets.GCP_ZONE }} \
-            --project=${{ secrets.GCP_PROJECT_ID }}
-          
-          echo "Running deployment script..."
-          gcloud compute ssh $INSTANCE_NAME \
-            --zone=${{ secrets.GCP_ZONE }} \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
-            --command="sudo /opt/${{ env.APP_NAME }}/shared/deploy.sh development ${VERSION} /tmp/${{ env.APP_NAME }}-${VERSION}"
-          
-          gcloud compute ssh $INSTANCE_NAME \
-            --zone=${{ secrets.GCP_ZONE }} \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
-            --command="rm -f /tmp/${{ env.APP_NAME }}-${VERSION}"
-          
-          echo "Development deployment completed successfully!"
-          echo "Preview URL: https://${{ env.DEV_DOMAIN }}"
-
-      - name: verify
-        run: |
-          echo "Verifying development deployment..."
-          sleep 10
-          
-          # Test health endpoint
-          if curl -f -s "https://${{ env.DEV_DOMAIN }}/health" > /dev/null; then
-            echo "✅ Development deployment verified successfully!"
-          else
-            echo "❌ Development deployment verification failed"
-            exit 1
-          fi
-
-  production:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: 'read'
-      id-token: 'write'
-    
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: build
-        run: |
-          echo "Building ${{ env.APP_NAME }} for production..."
-          go build -o ${{ env.APP_NAME }} main.go
-          echo "Build completed successfully"
-
-      - uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      - name: create deploy script
-        run: |
-          echo "Creating deployment script on server..."
-          
-          # Copy the deploy script and config to the server
-          gcloud compute scp scripts/deploy.sh scripts/environments.conf ${{ secrets.GCP_INSTANCE_NAME }}:/tmp/ \
-            --zone=${{ secrets.GCP_ZONE }} \
-            --project=${{ secrets.GCP_PROJECT_ID }}
-          
-          # Move the files to the correct location and make script executable
-          gcloud compute ssh ${{ secrets.GCP_INSTANCE_NAME }} \
             --zone=${{ secrets.GCP_ZONE }} \
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --command="sudo mkdir -p /opt/${{ env.APP_NAME }}/shared && sudo mv /tmp/deploy.sh /opt/${{ env.APP_NAME }}/shared/deploy.sh && sudo mv /tmp/environments.conf /opt/${{ env.APP_NAME }}/shared/environments.conf && sudo chmod +x /opt/${{ env.APP_NAME }}/shared/deploy.sh"
@@ -152,13 +126,14 @@ jobs:
           echo "Deployment script and configuration created successfully!"
 
       - name: create release
+        if: matrix.environment == 'production'
         id: create_release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v${{ github.run_number }}
-          release_name: Release v${{ github.run_number }}
+          tag_name: ${{ steps.env_vars.outputs.version }}
+          release_name: Release ${{ steps.env_vars.outputs.version }}
           body: |
             Production deployment for commit ${{ github.sha }}
             
@@ -167,52 +142,110 @@ jobs:
           draft: false
           prerelease: false
 
-      - name: deploy
+      - name: run deploy.sh
         run: |
-          echo "Deploying to production environment..."
+          echo "Deploying to ${{ matrix.environment }} environment..."
+          echo "Version: ${{ steps.env_vars.outputs.version }}"
+
+          INSTANCE_NAME=`gcloud compute instances list --filter="tags.items=visitor-counter" --format="value(name)"`
           
-          # Generate version from run number
-          VERSION="v${{ github.run_number }}"
-          echo "Version: $VERSION"
-          
-          # Copy binary to server
           echo "Copying binary to server..."
-          gcloud compute scp ${{ env.APP_NAME }} ${{ secrets.GCP_INSTANCE_NAME }}:/tmp/${{ env.APP_NAME }}-${VERSION} \
+          gcloud compute scp ${{ env.APP_NAME }} $INSTANCE_NAME:/tmp/${{ env.APP_NAME }}-${{ steps.env_vars.outputs.version }} \
             --zone=${{ secrets.GCP_ZONE }} \
             --project=${{ secrets.GCP_PROJECT_ID }}
           
-          # Deploy using the deployment script
           echo "Running deployment script..."
-          gcloud compute ssh ${{ secrets.GCP_INSTANCE_NAME }} \
+          gcloud compute ssh $INSTANCE_NAME \
             --zone=${{ secrets.GCP_ZONE }} \
             --project=${{ secrets.GCP_PROJECT_ID }} \
-            --command="sudo /opt/${{ env.APP_NAME }}/shared/deploy.sh production ${VERSION} /tmp/${{ env.APP_NAME }}-${VERSION}"
+            --command="sudo /opt/${{ env.APP_NAME }}/shared/deploy.sh ${{ matrix.environment }} ${{ steps.env_vars.outputs.version }} /tmp/${{ env.APP_NAME }}-${{ steps.env_vars.outputs.version }}"
           
-          # Clean up temporary file
-          gcloud compute ssh ${{ secrets.GCP_INSTANCE_NAME }} \
+          gcloud compute ssh $INSTANCE_NAME \
             --zone=${{ secrets.GCP_ZONE }} \
             --project=${{ secrets.GCP_PROJECT_ID }} \
-            --command="rm -f /tmp/${{ env.APP_NAME }}-${VERSION}"
+            --command="rm -f /tmp/${{ env.APP_NAME }}-${{ steps.env_vars.outputs.version }}"
           
-          echo "Production deployment completed successfully!"
-          echo "Production URL: https://${{ env.PROD_DOMAIN }}"
+          echo "${{ matrix.environment }} deployment completed successfully!"
+          echo "URL: https://${{ steps.env_vars.outputs.domain }}"
 
-      - name: verify
+      - name: verify deployment
         run: |
-          echo "Verifying production deployment..."
+          echo "Verifying ${{ matrix.environment }} deployment..."
           sleep 10
           
           # Test health endpoint
-          if curl -f -s "https://${{ env.PROD_DOMAIN }}/health" > /dev/null; then
-            echo "✅ Production deployment verified successfully!"
+          if curl -f -s "https://${{ steps.env_vars.outputs.domain }}/health" > /dev/null; then
+            echo "✅ ${{ matrix.environment }} deployment verified successfully!"
           else
-            echo "❌ Production deployment verification failed"
+            echo "❌ ${{ matrix.environment }} deployment verification failed"
             exit 1
           fi
 
-      - name: notify
-        run: |
-          echo "🚀 Production deployment completed!"
-          echo "📊 Version: v${{ github.run_number }}"
-          echo "🌐 URL: https://${{ env.PROD_DOMAIN }}"
-          echo "🔗 Release: ${{ steps.create_release.outputs.upload_url }}" 
+      - name: comment on pull request
+        if: matrix.environment == 'development' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `🚀 **Development Deployment Successful!**
+            
+            **Version:** ${{ steps.env_vars.outputs.version }}
+            **Environment:** Development
+            **URL:** https://${{ steps.env_vars.outputs.domain }}
+            **Commit:** \`${{ github.sha }}\`
+            
+            Your changes have been deployed to the development environment and are ready for testing.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      # - name: update github environment
+      #   if: matrix.environment == 'development' && github.event_name == 'pull_request'
+      #   uses: actions/github-script@v7
+      #   with:
+      #     script: |
+      #       const deployment = await github.rest.repos.createDeployment({
+      #         owner: context.repo.owner,
+      #         repo: context.repo.repo,
+      #         ref: context.sha,
+      #         environment: 'development',
+      #         description: 'Development deployment',
+      #         auto_merge: false,
+      #         required_contexts: []
+      #       });
+
+      #       await github.rest.repos.createDeploymentStatus({
+      #         owner: context.repo.owner,
+      #         repo: context.repo.repo,
+      #         deployment_id: deployment.data.id,
+      #         state: 'success',
+      #         environment_url: 'https://${{ steps.env_vars.outputs.domain }}',
+      #         description: 'Development deployment successful'
+      #       });
+
+      - name: update environment
+        # if: matrix.environment == 'production'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              environment: '${{ matrix.environment }}',
+              description: '${{ matrix.environment }}',
+              auto_merge: false,
+              required_contexts: []
+            });
+
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: deployment.data.id,
+              state: 'success',
+              environment_url: 'https://${{ steps.env_vars.outputs.domain }}',
+              description: '${{ matrix.environment }} deployment successful'
+            });

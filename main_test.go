@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -44,20 +45,6 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
-func TestAppInitialization(t *testing.T) {
-	// Test that App struct can be created
-	app := &App{
-		count: &VisitorCount{
-			Count:     0,
-			LastVisit: time.Now(),
-			IP:        "",
-		},
-	}
-	if app == nil {
-		t.Error("Failed to create App instance")
-	}
-}
-
 func TestIncrementVisitorCount(t *testing.T) {
 	app := &App{
 		count: &VisitorCount{
@@ -84,5 +71,8 @@ func TestIncrementVisitorCount(t *testing.T) {
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":"healthy","time":"2023-01-01T00:00:00Z"}`))
+	_, err := w.Write([]byte(`{"status":"healthy","time":"2023-01-01T00:00:00Z"}`))
+	if err != nil {
+		log.Printf("Error writing response: %v", err)
+	}
 }
