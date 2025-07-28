@@ -63,13 +63,3 @@ jobs:
         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       working-directory: terraform
       if: github.event.inputs.action == 'destroy'
-
-    - name: get instance ip
-      id: instance_ip
-      working-directory: terraform
-      run: |
-        if [ "${{ github.event.inputs.action }}" != "destroy" ]; then
-          IP=$(terraform output -raw instance_ip)
-          echo "instance_ip=$IP" >> $GITHUB_OUTPUT
-          echo "Instance IP: $IP"
-        fi
