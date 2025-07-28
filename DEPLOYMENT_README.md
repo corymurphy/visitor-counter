@@ -61,7 +61,7 @@ NGINX acts as a reverse proxy with domain-based routing:
 ```nginx
 # Production
 server {
-    listen 80;
+    listen 443;
     server_name visitor-counter.corymurphy.net;
     location / {
         proxy_pass http://localhost:8080;
@@ -70,7 +70,7 @@ server {
 
 # Development
 server {
-    listen 80;
+    listen 443;
     server_name visitor-counter.development.corymurphy.net;
     location / {
         proxy_pass http://localhost:8081;
