@@ -111,7 +111,7 @@ func (app *App) handleHome(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
     <div class="container">
-        <h1>👋 Welcome!</h1>
+        <h1>👋 Welcome to Visitor Counter!</h1>
         <div class="counter">%d</div>
         <p>visitors have been here</p>
         <div class="last-visit">
